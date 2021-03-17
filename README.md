@@ -1,2 +1,2 @@
 # EE2028
-Project done by me and my partner, Lee Shen Hern for the EE2028 (Microcontroller programming and interfacing) module.
+Project done by Kristine Lee and Lee Shen Hern for the EE2028 (Microcontroller programming and interfacing) module.
