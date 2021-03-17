@@ -10,13 +10,14 @@
 #include "main.h"
 #include "../../Drivers/BSP/B-L475E-IOT01/stm32l475e_iot01_accelero.h"
 #include "../../Drivers/BSP/B-L475E-IOT01/stm32l475e_iot01_tsensor.h"
-#include "C:\Users\goshe\Personal\NUS Matters\Y2S1\EE2028\Workspace\Assignment2\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_gyro.h"
-#include "C:\Users\goshe\Personal\NUS Matters\Y2S1\EE2028\Workspace\Assignment2\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_hsensor.h"
-#include "C:\Users\goshe\Personal\NUS Matters\Y2S1\EE2028\Workspace\Assignment2\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_magneto.h"
-#include "C:\Users\goshe\Personal\NUS Matters\Y2S1\EE2028\Workspace\Assignment2\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_psensor.h"
+#include "..\..\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_gyro.h"
+#include "..\..\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_hsensor.h"
+#include "..\..\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_magneto.h"
+#include "..\..\Drivers\BSP\B-L475E-IOT01\stm32l475e_iot01_psensor.h"
 #include "stdio.h"
 #include "math.h"
 #include "string.h"
+#include "wifi.h"
 
 #define HEALTHY 0
 #define INTENSIVE 1
@@ -26,6 +27,33 @@
 #define HUM_THRESHOLD 70.0
 #define WARNING 1
 #define SAFE 0
+
+/*wifi definitions and variable
+ * */
+
+#define MAX_LENGTH 400  // adjust it depending on the max size of the packet you expect to send or receive
+#define WIFI_READ_TIMEOUT 10000
+#define WIFI_WRITE_TIMEOUT 10000
+//#define USING_IOT_SERVER // This line should be commented out if using Packet Sender (not IoT server connection)
+
+const char* WiFi_SSID = "Shen";               // Replacce mySSID with WiFi SSID for your router / Hotspot
+const char* WiFi_password = "shenhern";   // Replace myPassword with WiFi password for your router / Hotspot
+const WIFI_Ecn_t WiFi_security = WIFI_ECN_WPA2_PSK; // WiFi security your router / Hotspot. No need to change it unless you use something other than WPA2 PSK
+const uint16_t SOURCE_PORT = 1234;  // source port, which can be almost any 16 bit number
+
+uint8_t ipaddr[4] = {192, 168, 43, 182}; // IP address of your laptop wireless lan adapter, which is the one you successfully used to test Packet Sender above.
+                                    // If using IoT platform, this will be overwritten by DNS lookup, so the values of x and y doesn't matter
+                                            //(it should still be filled in with numbers 0-255 to avoid compilation errors)
+
+#ifdef USING_IOT_SERVER
+    const char* SERVER_NAME = "demo.thingsboard.io";    // domain name of the IoT server used
+    const uint16_t DEST_PORT = 80;          // 'server' port number. Change according to application layer protocol. 80 is the destination port for HTTP protocol.
+#else
+    const uint16_t DEST_PORT = 2028;        // 'server' port number - this is the port Packet Sender listens to (as you set in Packer Sender)
+                                                // and should be allowed by the OS firewall
+#endif
+SPI_HandleTypeDef hspi3;
+
 
 //extern void initialise_monitor_handles(void);	// for semi-hosting support (printf)
 static void MX_GPIO_Init(void);
@@ -57,6 +85,7 @@ int main(void)
 	float gyro_total;
 	float p_data;
 	int16_t magneto_data_i16[3] = { 0 };
+	char wifi_message[6];
 
 	 //initialize to 0
 	count_healthy = 0;
@@ -79,8 +108,33 @@ int main(void)
 	accelero_interrupt_config();
 	pressure_interrupt_config();
 
-	//enable exti interrupt
-	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);		//enable nvic
+	//enable nvic exti interrupt
+	HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
+	HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
+	//set interrupt priority, default priogrouping = 3
+	uint32_t setprio;
+	setprio = NVIC_EncodePriority (3, 1, 0);
+	__NVIC_SetPriority(EXTI15_10_IRQn, setprio);
+
+	//WIFI initialisation
+	  uint8_t req[MAX_LENGTH];  // request packet
+	  uint8_t resp[MAX_LENGTH]; // response packet
+	  uint16_t Datalen;
+	  WIFI_Status_t WiFi_Stat; // WiFi status. Should remain WIFI_STATUS_OK if everything goes well
+
+	  WiFi_Stat = WIFI_Init();                      // if it gets stuck here, you likely did not include EXTI1_IRQHandler() in stm32l4xx_it.c as mentioned above
+	  WiFi_Stat &= WIFI_Connect(WiFi_SSID, WiFi_password, WiFi_security); // joining a WiFi network takes several seconds. Don't be too quick to judge that your program has 'hung' :)
+	  if(WiFi_Stat!=WIFI_STATUS_OK) while(1);                   // halt computations if a WiFi connection could not be established.
+
+	#ifdef USING_IOT_SERVER
+	  WiFi_Stat = WIFI_GetHostAddress(SERVER_NAME, ipaddr); // DNS lookup to find the ip address, if using a connection to an IoT server
+	#endif
+	  // WiFi_Stat = WIFI_Ping(ipaddr, 3, 200);                 // Optional ping 3 times in 200 ms intervals
+	  WiFi_Stat = WIFI_OpenClientConnection(1, WIFI_TCP_PROTOCOL, "conn", ipaddr, DEST_PORT, SOURCE_PORT); // Make a TCP connection.
+	                                                                  // "conn" is just a name and serves no functional purpose
+
+	  if(WiFi_Stat!=WIFI_STATUS_OK) while(1);                   // halt computations if a connection could not be established with the server
 
 	while (1)
 	{
@@ -105,6 +159,7 @@ int main(void)
 
 				//temperature and humidity
 				temp_data = BSP_TSENSOR_ReadTemp();			// read temperature sensor
+				sprintf(wifi_message, "%0.2f", temp_data);
 				hum_data = BSP_HSENSOR_ReadHumidity();		//read humidity sensor
 
 				//gyroscope
@@ -135,20 +190,30 @@ int main(void)
 
 				//raising flags for warnings (pressure, gyro and accelero done through INT)
 
-				if(Mag_Difference[0] >= MAG_THRESHOLD || Mag_Difference[1] >= MAG_THRESHOLD || Mag_Difference[2] >= MAG_THRESHOLD)
+				if(Mag_Difference[0] >= MAG_THRESHOLD || Mag_Difference[1] >= MAG_THRESHOLD || Mag_Difference[2] >= MAG_THRESHOLD){
 					magflag = WARNING;
-				if (temp_data >= TEMP_THRESHOLD)
+					sprintf(message_print, "\r\nCheck patient's orientation\r\n");
+					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+				}
+				if (temp_data >= TEMP_THRESHOLD){
 					tempflag = WARNING;
-				if (hum_data <= HUM_THRESHOLD)
+					sprintf(message_print, "\r\nFever is detected\r\n");
+					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+				}
+				if (hum_data <= HUM_THRESHOLD){
 					humidflag = WARNING;
+					sprintf(message_print, "\r\nCheck patient's breath!\r\n");
+					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+				}
 			}
 
-			endcount = HAL_GetTick();
+
 
 			if (timer_10s == 0){
 				//readings transmission
 				sprintf(message_print, "%03d TEMP %0.2f ACC %0.2f %0.2f %0.2f\r\n", count/40, temp_data, accel_data[0], accel_data[1], accel_data[2]);
 				HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+				WiFi_Stat = WIFI_SendData(1, wifi_message, (uint16_t)strlen((char*)wifi_message), &Datalen, WIFI_WRITE_TIMEOUT);
 				sprintf(message_print, "%03d GYRO %0.1f MAGNETO %0.2f %0.2f %0.2f\r\n", count/40, gyro_total, magneto_data[0], magneto_data[1], magneto_data[2]);
 				HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
 				sprintf(message_print, "%03d HUMIDITY %0.2f and BARO %0.2f\r\n",count/40,  hum_data, p_data);
@@ -157,30 +222,25 @@ int main(void)
 				if (tempflag == WARNING){
 					sprintf(message_print, "Fever is detected\r\n");
 					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
-					tempflag = SAFE;
 				}
 				if (accflag == WARNING){
 					sprintf(message_print, "Falling is detected\r\n");
 					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
-					accflag = SAFE;
 				}
 				if (gyroflag == WARNING){
 					sprintf(message_print, "Patient in pain!\r\n");
 					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
-					gyroflag = SAFE;
 				}
 				if (pressureflag == WARNING || humidflag == WARNING){
 					sprintf(message_print, "Check patient's breath!\r\n");
 					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
-					pressureflag = SAFE;
-					humidflag = SAFE;
 				}
 				if (magflag == WARNING){
 					sprintf(message_print, "Check patient's orientation\r\n");
 					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
-					magflag = SAFE;
 				}
 			}
+			endcount = HAL_GetTick();
 
 			difference = endcount - startcount;
 			delay(250 - difference);
@@ -190,8 +250,11 @@ int main(void)
 			float temp_data;
 			temp_data = BSP_TSENSOR_ReadTemp();			// read temperature sensor
 			//raise flag for temperature warning
-			if (temp_data >= TEMP_THRESHOLD)
+			if (temp_data >= TEMP_THRESHOLD){
 				tempflag = WARNING;
+				sprintf(message_print, "\r\nFever is detected\r\n");
+				HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+			}
 
 			if (tempflag == WARNING || accflag == WARNING){
 				HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14);
@@ -210,8 +273,6 @@ int main(void)
 					sprintf(message_print, "All good\r\n");
 					HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
 				}
-				accflag = SAFE;
-				tempflag = SAFE;
 			}
 
 			count_healthy ++;
@@ -245,19 +306,19 @@ static void MX_GPIO_Init(void)
   //configure GPIO pin BUT_EXTI13
   GPIO_PushButton.Pin = BUTTON_EXTI13_Pin;
   GPIO_PushButton.Mode = GPIO_MODE_IT_FALLING;
-  GPIO_PushButton.Pull = GPIO_NOPULL;
+  GPIO_PushButton.Pull = GPIO_PULLUP;
   GPIO_PushButton.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOC, &GPIO_PushButton);
   //configure GPIO Pin lsm6dsl
   GPIO_lsm6dsl.Pin = LSM6DSL_INT1_EXTI11_Pin;
   GPIO_lsm6dsl.Mode = GPIO_MODE_IT_RISING;
-  GPIO_lsm6dsl.Pull = GPIO_NOPULL;
+  GPIO_lsm6dsl.Pull = GPIO_PULLDOWN;
   GPIO_lsm6dsl.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_lsm6dsl);
   //configure GPIO Pin lps22hb
   GPIO_lps22hb.Pin = LPS22HB_INT_DRDY_EXTI0_Pin;
   GPIO_lps22hb.Mode = GPIO_MODE_IT_RISING;
-  GPIO_lps22hb.Pull = GPIO_NOPULL;
+  GPIO_lps22hb.Pull = GPIO_PULLDOWN;
   GPIO_lps22hb.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOD, &GPIO_lps22hb);
 }
@@ -271,16 +332,30 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 		uint8_t temp;
 		temp = SENSOR_IO_Read(LSM6DSL_ACC_GYRO_I2C_ADDRESS_LOW+1, LSM6DSL_ACC_GYRO_WAKE_UP_SRC);
 		temp &= 0x20; //read bit[5] to determine if FF flag was raised by device
-		if (temp)
+		if (temp){
 			accflag = WARNING;
-		else
-			gyroflag = WARNING;
+			sprintf(message_print, "\r\nFalling is detected\r\n");
+			HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+		}
+		else{
+			if (mode == INTENSIVE){
+				gyroflag = WARNING;
+				sprintf(message_print, "\r\nPatient in pain!\r\n");
+				HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
+			}
+		}
 	}
 
 	if (GPIO_Pin == LPS22HB_INT_DRDY_EXTI0_Pin){
 		if (mode == INTENSIVE){
 			pressureflag = WARNING;
+			sprintf(message_print, "\r\nCheck patient's breath!\r\n");
+			HAL_UART_Transmit(&huart1, (uint8_t*)message_print, strlen(message_print),0xFFFF);
 		}
+	}
+
+	if (GPIO_Pin == GPIO_PIN_1){
+		SPI_WIFI_ISR();
 	}
 }
 
@@ -391,4 +466,9 @@ void FlagsToZero(void){
 	tempflag = SAFE;
 	magflag = SAFE;
 	humidflag = SAFE;
+}
+
+void SPI3_IRQHandler(void)
+{
+    HAL_SPI_IRQHandler(&hspi3);
 }
